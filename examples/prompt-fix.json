@@ -1,0 +1,23 @@
+{
+  "run_id": "test-prompt-fix",
+  "voice": "am_michael",
+  "speed": 1.0,
+  "music": "",
+  "scenes": [
+    {"kind": "hook", "kicker": "Prompt fix", "title": "Better AI answers", "highlight": "in 3 steps",
+     "vo": "Stop scrolling! If ChatGPT keeps giving you boring answers... it's not the AI. It's your prompt.",
+     "broll": "frustrated man laptop night"},
+    {"kind": "step", "title": "Give it a role", "try": "You are an accountant for small shops.",
+     "vo": "Step one. Give it a role! Tell it exactly who to be, like an accountant for small shops.",
+     "broll": "accountant working desk"},
+    {"kind": "step", "title": "Add your context", "try": "For a 2-person bakery in Pune, budget ₹5,000.",
+     "vo": "Step two. Add your context. Who's it for? What's the budget? What are the limits?",
+     "broll": "bakery shop owner"},
+    {"kind": "step", "title": "Ask for a format", "try": "Reply as a 5-row table, under 80 words.",
+     "vo": "And step three. Ask for a format. A table, a checklist, or five quick points. Done!",
+     "broll": "typing on laptop close up"},
+    {"kind": "cta", "title": "Save this for your next prompt", "question": "Which step do you skip: 1, 2 or 3?",
+     "vo": "Save this for later, send it to a friend, and comment below. Which step do you always skip?",
+     "broll": "woman smiling phone scrolling"}
+  ]
+}

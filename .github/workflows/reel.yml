@@ -1,0 +1,115 @@
+name: Render Reel
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: "Reel spec JSON (see render.py)"
+        required: true
+      callback:
+        description: "URL to POST the result to (Make webhook)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reel-render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: System packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng ffmpeg > /dev/null
+
+      - name: Python packages
+        run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q -r requirements.txt
+
+      - name: Cache voice model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: kokoro-82m-v1
+
+      - name: Logo
+        continue-on-error: true
+        run: |
+          mkdir -p assets
+          [ -f assets/logo-dark.png ] || curl -fsSL --retry 4 --retry-delay 5 -o assets/logo-dark.png https://i.ibb.co/VYc22yGq/makeasy-logo-dark.png
+
+      - name: Spec
+        id: spec
+        env:
+          SPEC: ${{ inputs.spec }}
+        run: |
+          printf '%s' "$SPEC" > spec.json
+          python -c "import json;d=json.load(open('spec.json'));print('run_id=' + d.get('run_id','reel'))" >> "$GITHUB_OUTPUT"
+
+      - name: Render
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: python render.py spec.json "out/${{ steps.spec.outputs.run_id }}.mp4"
+
+      - name: Publish to the videos branch (served by GitHub Pages)
+        id: pub
+        env:
+          RUN_ID: ${{ steps.spec.outputs.run_id }}
+        run: |
+          set -e
+          git config user.name "Makeasy Spark"
+          git config user.email "actions@users.noreply.github.com"
+          mkdir -p /tmp/pub && cp "out/$RUN_ID.mp4" "out/$RUN_ID.mp4.json" /tmp/pub/
+          if git ls-remote --exit-code --heads origin videos > /dev/null; then
+            git fetch -q --depth 1 origin videos && git checkout -q -B videos FETCH_HEAD
+          else
+            git checkout -q --orphan videos && git rm -rq --cached . && git clean -fdxq -e out
+            echo "Makeasy Spark rendered Reels (auto-deleted after 10 days)." > README.md && touch .nojekyll
+          fi
+          mkdir -p reels && cp /tmp/pub/* reels/
+          # keep the repo small: drop Reels older than 10 days
+          find reels -name '*.mp4*' -mtime +10 -delete || true
+          git add -A README.md .nojekyll reels && git commit -qm "Reel $RUN_ID" && git push -q origin videos
+          echo "url=https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/reels/$RUN_ID.mp4" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until the video link is live
+        run: |
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -I "${{ steps.pub.outputs.url }}")
+            [ "$code" = "200" ] && echo "live" && exit 0
+            sleep 15
+          done
+          echo "video link not live after 10 min" && exit 1
+
+      - name: Report success
+        if: success() && inputs.callback != ''
+        env:
+          URL: ${{ steps.pub.outputs.url }}
+          RUN_ID: ${{ steps.spec.outputs.run_id }}
+          CB: ${{ inputs.callback }}
+        run: |
+          INFO=$(cat "out/$RUN_ID.mp4.json")
+          curl -s -X POST "$CB" --data-urlencode "tag=spark-$RUN_ID" --data-urlencode "status=rendered" \
+            --data-urlencode "video_url=$URL" --data-urlencode "info=$INFO" \
+            --data-urlencode "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Report failure
+        if: failure() && inputs.callback != ''
+        env:
+          RUN_ID: ${{ steps.spec.outputs.run_id }}
+          CB: ${{ inputs.callback }}
+        run: |
+          curl -s -X POST "$CB" --data-urlencode "tag=spark-$RUN_ID" --data-urlencode "status=render_failed" \
+            --data-urlencode "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
