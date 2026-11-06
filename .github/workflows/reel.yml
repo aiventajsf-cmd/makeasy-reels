@@ -116,7 +116,9 @@ jobs:
           CB: ${{ inputs.callback }}
         run: |
           INFO=$(cat "out/$RUN_ID.mp4.json")
+          META=$(python -c "import json;print(json.dumps(json.load(open('spec.json')).get('meta',{})))")
           curl -s -X POST "$CB" --data-urlencode "tag=spark-$RUN_ID" --data-urlencode "status=rendered" \
+            --data-urlencode "run_id=$RUN_ID" --data-urlencode "meta=$META" \
             --data-urlencode "video_url=$URL" --data-urlencode "info=$INFO" \
             --data-urlencode "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
@@ -126,5 +128,7 @@ jobs:
           RUN_ID: ${{ steps.spec.outputs.run_id }}
           CB: ${{ inputs.callback }}
         run: |
+          META=$(python -c "import json;print(json.dumps(json.load(open('spec.json')).get('meta',{})))" 2>/dev/null || echo '{}')
           curl -s -X POST "$CB" --data-urlencode "tag=spark-$RUN_ID" --data-urlencode "status=render_failed" \
+            --data-urlencode "run_id=$RUN_ID" --data-urlencode "meta=$META" \
             --data-urlencode "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
