@@ -21,7 +21,7 @@ Spec (JSON):
      "vo": "...", "broll": "phone scrolling social media"}
   ]
 }
-Env: PEXELS_API_KEY (stock video; without it brand-colour backgrounds are used), MOCK=1 (offline test).
+Env: PIXABAY_API_KEY or PEXELS_API_KEY (stock video; without one brand-colour backgrounds are used), MOCK=1 (offline test).
 Output: 1080x1920, 30 fps, H.264 high, yuv420p, AAC 48 kHz stereo, faststart, ≤ 4.5 Mbps (Instagram Reel spec).
 """
 import json, math, os, re, shutil, subprocess, sys, tempfile, wave
@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FONT = {w: os.path.join(HERE, "fonts", f"Inter-{w}.otf") for w in ("Black", "ExtraBold", "SemiBold")}
 DEEP, MINT, SUN, WHITE, INK = (8, 34, 31), (79, 209, 191), (255, 214, 10), (250, 250, 247), (10, 14, 13)
 MOCK = os.environ.get("MOCK") == "1"
-NO_FOOTAGE = MOCK or not os.environ.get("PEXELS_API_KEY")
+NO_FOOTAGE = MOCK or not (os.environ.get("PEXELS_API_KEY") or os.environ.get("PIXABAY_API_KEY"))
 SR = 24000
 LEAD, TAIL = 0.12, 0.18          # tight pacing: tiny pause before/after each line
 CUT = 2.0                         # new b-roll shot every ~2 s
@@ -130,7 +130,7 @@ def sfx_pop(d=0.09):
     return (np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 45) * 0.28).astype(np.float32)
 
 
-# ───────────────────────── stock footage (Pexels, free) ─────────────────────────
+# ───────────────────────── stock footage (Pexels / Pixabay, free) ─────────────────────────
 def pexels_clips(query, n, used):
     import requests
     key = os.environ.get("PEXELS_API_KEY", "")
@@ -153,6 +153,47 @@ def pexels_clips(query, n, used):
             if len(out) >= n:
                 return out
     return out
+
+
+def pixabay_clips(query, n, used):
+    """Pixabay videos (free, commercial use, no attribution needed). Prefers portrait, else centre-cropped."""
+    import requests
+    key = os.environ.get("PIXABAY_API_KEY", "")
+    out, cands = [], []
+    for q in (query, "technology abstract", "laptop computer"):
+        r = requests.get("https://pixabay.com/api/videos/", params={"key": key, "q": q[:100], "per_page": 30,
+                         "safesearch": "true", "order": "popular"}, timeout=30)
+        if r.status_code != 200:
+            log("pixabay", r.status_code, r.text[:200]); continue
+        for v in r.json().get("hits", []):
+            if v["id"] in used or v.get("duration", 0) < 3:
+                continue
+            files = [f for f in v.get("videos", {}).values() if f.get("url") and f.get("height")]
+            if not files:
+                continue
+            portrait = any(f["height"] > f["width"] for f in files)
+            good = [f for f in files if min(f["width"], f["height"]) >= 1080] or files
+            f = min(good, key=lambda f: abs(max(f["width"], f["height"]) - 1920))
+            cands.append((0 if portrait else 1, len(cands), v["id"], f["url"], v.get("user", "")))
+        if len([c for c in cands if c[2] not in used]) >= n:
+            break
+    for _, _, vid, url, user in sorted(cands):
+        if vid in used:
+            continue
+        used.add(vid)
+        out.append({"url": url, "credit": f"{user} (Pixabay)"})
+        if len(out) >= n:
+            break
+    return out
+
+
+def footage_clips(query, n, used):
+    clips = []
+    if os.environ.get("PEXELS_API_KEY"):
+        clips = pexels_clips(query, n, used)
+    if len(clips) < n and os.environ.get("PIXABAY_API_KEY"):
+        clips += pixabay_clips(query, n - len(clips), used)
+    return clips
 
 
 def download(url, path):
@@ -430,7 +471,7 @@ def main(spec_path, out_path):
     palette = ["#0f3d38", "#1d2b4a", "#3a2a1a", "#123a2c", "#2b1d3a", "#14313d"]
     for i, (sc, tl) in enumerate(zip(scenes, timeline)):
         n = max(1, round(tl["dur"] / CUT))
-        clips = [] if NO_FOOTAGE else pexels_clips(sc.get("broll") or "technology", n, used)
+        clips = [] if NO_FOOTAGE else footage_clips(sc.get("broll") or "technology", n, used)
         part = tl["dur"] / n
         for j in range(n):
             src = None

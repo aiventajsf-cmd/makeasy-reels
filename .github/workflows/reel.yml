@@ -77,6 +77,7 @@ jobs:
       - name: Render
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: python render.py spec.json "out/${{ steps.spec.outputs.run_id }}.mp4"
 
       - name: Publish to the videos branch (served by GitHub Pages)
