@@ -31,7 +31,10 @@ jobs:
           cache: pip
 
       - name: System packages
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng ffmpeg > /dev/null
+        timeout-minutes: 6
+        run: |
+          command -v ffmpeg || (sudo timeout 300 apt-get update -qq -o Acquire::Retries=3 && sudo timeout 300 apt-get install -y -qq ffmpeg > /dev/null)
+          ffmpeg -version | head -1
 
       - name: Python packages
         run: |
@@ -50,6 +53,7 @@ jobs:
       - name: Voice reference (male, made once with Kokoro)
         run: |
           if [ ! -f assets/voice_ref.wav ]; then
+            sudo timeout 300 apt-get install -y -qq espeak-ng > /dev/null || true
             python -m venv /tmp/kv && /tmp/kv/bin/pip install -q torch --index-url https://download.pytorch.org/whl/cpu
             /tmp/kv/bin/pip install -q "kokoro>=0.9.4" soundfile
             mkdir -p assets && /tmp/kv/bin/python scripts/make_voice_ref.py assets/voice_ref.wav am_michael
