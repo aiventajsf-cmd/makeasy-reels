@@ -39,6 +39,11 @@ NO_FOOTAGE = MOCK or not (os.environ.get("PEXELS_API_KEY") or os.environ.get("PI
 SR = 24000
 LEAD, TAIL = 0.12, 0.18          # tight pacing: tiny pause before/after each line
 CUT = 2.0                         # new b-roll shot every ~2 s
+# cinematic look on every shot: teal shadows / warm highlights, filmic contrast, soft vignette, fine grain, crisp detail
+CINE_GRADE = ("colorbalance=rs=-0.05:gs=0.0:bs=0.07:rm=0.02:bm=-0.02:rh=0.07:gh=0.02:bh=-0.06,"
+              "eq=contrast=1.14:saturation=1.08:brightness=-0.035:gamma=0.96,"
+              "curves=all='0/0.03 0.25/0.21 0.5/0.5 0.75/0.79 1/0.97',"
+              "vignette=angle=PI/4.6:mode=forward,unsharp=5:5:0.55:5:5:0.0,noise=alls=4:allf=t")
 CAP_Y = 1395                      # caption centre (kept above Instagram's bottom UI zone)
 
 
@@ -135,7 +140,7 @@ def pexels_clips(query, n, used):
     import requests
     key = os.environ.get("PEXELS_API_KEY", "")
     out = []
-    for q in (query, "technology abstract", "laptop work"):
+    for q in (query, "cinematic technology", "cinematic city night"):
         r = requests.get("https://api.pexels.com/videos/search", headers={"Authorization": key},
                          params={"query": q, "orientation": "portrait", "size": "medium", "per_page": 20}, timeout=30)
         if r.status_code != 200:
@@ -160,7 +165,7 @@ def pixabay_clips(query, n, used):
     import requests
     key = os.environ.get("PIXABAY_API_KEY", "")
     out, cands = [], []
-    for q in (query, "technology abstract", "laptop computer"):
+    for q in (query, "cinematic technology", "cinematic city night"):
         r = requests.get("https://pixabay.com/api/videos/", params={"key": key, "q": q[:100], "per_page": 30,
                          "safesearch": "true", "order": "popular"}, timeout=30)
         if r.status_code != 200:
@@ -172,8 +177,11 @@ def pixabay_clips(query, n, used):
             if not files:
                 continue
             portrait = any(f["height"] > f["width"] for f in files)
-            good = [f for f in files if min(f["width"], f["height"]) >= 1080] or files
-            f = min(good, key=lambda f: abs(max(f["width"], f["height"]) - 1920))
+            if portrait:
+                good = [f for f in files if min(f["width"], f["height"]) >= 1080] or files
+                f = min(good, key=lambda f: abs(max(f["width"], f["height"]) - 1920))
+            else:  # landscape is centre-cropped to 9:16 → take the sharpest (up to 4K) so it stays crisp
+                f = max([f for f in files if max(f["width"], f["height"]) <= 3840] or files, key=lambda f: f["height"])
             cands.append((0 if portrait else 1, len(cands), v["id"], f["url"], v.get("user", "")))
         if len([c for c in cands if c[2] not in used]) >= n:
             break
@@ -188,6 +196,14 @@ def pixabay_clips(query, n, used):
 
 
 def footage_clips(query, n, used):
+    q = query if "cinematic" in query.lower() else f"cinematic {query}"
+    clips = footage_search(q, n, used)
+    if len(clips) < n:
+        clips += footage_search(query, n - len(clips), used)
+    return clips
+
+
+def footage_search(query, n, used):
     clips = []
     if os.environ.get("PEXELS_API_KEY"):
         clips = pexels_clips(query, n, used)
@@ -213,11 +229,11 @@ def download(url, path):
 
 def make_segment(src, dur, out, idx, mock_color=None):
     """One b-roll shot: exactly `dur` s at 1080x1920@30 with a punch-in zoom and slow drift."""
-    z = "1.0+0.14*max(0\\,1-t/0.28)+0.04*t/%f" % max(dur, 0.1)       # punch-in, then slow push
-    vf = (f"scale=w='trunc({W}*1.06*({z})/2)*2':h='trunc({H}*1.06*({z})/2)*2':eval=frame:"
+    z = "1.0+0.08*max(0\\,1-t/0.35)+0.05*t/%f" % max(dur, 0.1)       # soft punch-in, then slow cinematic push
+    vf = ("setpts=1.2*PTS," if not mock_color else "") + (f"scale=w='trunc({W}*1.06*({z})/2)*2':h='trunc({H}*1.06*({z})/2)*2':eval=frame:"
           "force_original_aspect_ratio=increase,"
           f"crop={W}:{H}:x='(iw-ow)/2':y='(ih-oh)/2',fps={FPS},"
-          "eq=contrast=1.08:saturation=1.12:brightness=-0.03,format=yuv420p")
+          + CINE_GRADE + ",format=yuv420p")
     if mock_color:
         src_args = ["-f", "lavfi", "-i", f"color=c={mock_color}:s=1200x2134:r={FPS},noise=alls=14:allf=t"]
     else:
