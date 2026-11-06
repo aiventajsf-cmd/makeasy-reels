@@ -186,7 +186,25 @@ def make_segment(src, dur, out, idx, mock_color=None):
 
 
 # ───────────────────────── website screenshot (Playwright, free) ─────────────────────────
-def screenshot(url, path):
+BLOCKED = re.compile(r"verify you are human|security verification|captcha|access denied|just a moment|"
+                     r"unusual traffic|are you a robot|enable javascript and cookies", re.I)
+
+
+def fallback_card(url, title, path):
+    """Clean branded card used when a site blocks screenshots."""
+    dom = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
+    img = Image.new("RGB", (1030, 1250), (250, 250, 247)); d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, 1030, 120], fill=(236, 238, 240))
+    d.rounded_rectangle([40, 30, 990, 90], 30, fill=WHITE); d.text((80, 40), dom, font=font("SemiBold", 34), fill=(90, 96, 100))
+    f = font("Black", 92); y = 260
+    for line in wrap(title, f, 900):
+        d.text((515 - f.getlength(line) / 2, y), line, font=f, fill=INK); y += 104
+    d.rounded_rectangle([315, y + 60, 715, y + 150], 45, fill=SUN)
+    t2 = "NEW THIS WEEK"; f2 = font("ExtraBold", 38); d.text((515 - f2.getlength(t2) / 2, y + 84), t2, font=f2, fill=INK)
+    img.save(path); return path
+
+
+def screenshot(url, path, title=""):
     if MOCK:
         img = Image.new("RGB", (1030, 2600), (245, 246, 248)); d = ImageDraw.Draw(img)
         d.rectangle([0, 0, 1030, 150], fill=(20, 20, 24)); d.text((40, 50), url, font=font("ExtraBold", 44), fill=WHITE)
@@ -194,21 +212,34 @@ def screenshot(url, path):
             d.rounded_rectangle([40, 220 + i * 200, 990, 380 + i * 200], 24, fill=(225, 229, 235))
         img.save(path); return path
     from playwright.sync_api import sync_playwright
+    mobile = dict(viewport={"width": 412, "height": 915}, device_scale_factor=2.5, is_mobile=True,
+                  user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+                             "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+    desktop = dict(viewport={"width": 520, "height": 1100}, device_scale_factor=2,
+                   user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/130.0 Safari/537.36")
     with sync_playwright() as p:
         b = p.chromium.launch()
-        pg = b.new_page(viewport={"width": 412, "height": 915}, device_scale_factor=2.5, is_mobile=True,
-                        user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
-                                   "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
-        pg.goto(url, wait_until="domcontentloaded", timeout=45000)
-        pg.wait_for_timeout(3500)
-        for sel in ["text=/^(Accept|Accept all|I agree|Got it|Allow all|OK)$/i"]:   # close cookie banners
+        ok = False
+        for opts in (mobile, desktop):
             try:
-                pg.locator(sel).first.click(timeout=1500)
-            except Exception:  # noqa
-                pass
-        pg.wait_for_timeout(800)
-        pg.screenshot(path=path, full_page=True)
+                pg = b.new_page(**opts)
+                pg.goto(url, wait_until="domcontentloaded", timeout=45000)
+                pg.wait_for_timeout(4000)
+                try:
+                    pg.locator("text=/^(Accept|Accept all|I agree|Got it|Allow all|OK)$/i").first.click(timeout=1500)
+                except Exception:  # noqa
+                    pass
+                pg.wait_for_timeout(800)
+                body = pg.inner_text("body")[:4000]
+                if BLOCKED.search(body) or len(body.strip()) < 40:
+                    log("screenshot blocked/empty:", url); pg.close(); continue
+                pg.screenshot(path=path, full_page=True); ok = True; break
+            except Exception as e:  # noqa
+                log("screenshot error:", url, e)
         b.close()
+    if not ok:
+        return fallback_card(url, title, path)
     img = Image.open(path).convert("RGB")
     if img.height > 2800:
         img.crop((0, 0, img.width, 2800)).save(path)
@@ -339,7 +370,10 @@ def scene_elements(sc, card):
     elif k == "item":
         badge, _ = text_block(f"#{sc.get('num', 1)}", 54, "Black", INK, bg=SUN + (255,), pad=(26, 8), radius=22, shadow=False)
         els.append((badge, *centred(badge, 250), 0.0, "pop"))
-        im, _ = text_block(sc["title"], 74, "Black", WHITE, max_w=940)
+        size = 74
+        while size > 50 and len(wrap(sc["title"], font("Black", size), 940)) > 2:
+            size -= 4
+        im, _ = text_block(sc["title"], size, "Black", WHITE, max_w=940)
         els.append((im, *centred(im, 352), 0.08, "slide"))
     else:  # cta
         im, _ = text_block(sc["title"], 104, "Black", WHITE, max_w=940)
@@ -430,7 +464,7 @@ def main(spec_path, out_path):
         c = None
         if sc.get("shot"):
             try:
-                c = phone_card(screenshot(sc["shot"], os.path.join(tmp, f"shot_{len(cards)}.png")))
+                c = phone_card(screenshot(sc["shot"], os.path.join(tmp, f"shot_{len(cards)}.png"), sc.get("title", "")))
             except Exception as e:  # noqa
                 log("screenshot failed:", sc["shot"], e)
         cards.append(c)
