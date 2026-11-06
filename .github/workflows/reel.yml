@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: reel-render
@@ -99,14 +100,21 @@ jobs:
           git add -A README.md .nojekyll reels && git commit -qm "Reel $RUN_ID" && git push -q origin videos
           echo "url=https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/reels/$RUN_ID.mp4" >> "$GITHUB_OUTPUT"
 
-      - name: Wait until the video link is live
+      - name: Wait until the video link is live (re-requests the Pages build if GitHub hiccups)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' -I "${{ steps.pub.outputs.url }}")
             [ "$code" = "200" ] && echo "live" && exit 0
+            # every 4 minutes without success, ask GitHub Pages to build/deploy again
+            if [ $((i % 16)) -eq 0 ]; then
+              echo "not live yet – requesting a new Pages build"
+              gh api -X POST "repos/$GITHUB_REPOSITORY/pages/builds" > /dev/null || true
+            fi
             sleep 15
           done
-          echo "video link not live after 10 min" && exit 1
+          echo "video link not live after 15 min" && exit 1
 
       - name: Report success
         if: success() && inputs.callback != ''
