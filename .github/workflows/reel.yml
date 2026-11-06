@@ -21,7 +21,7 @@ concurrency:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -35,14 +35,25 @@ jobs:
 
       - name: Python packages
         run: |
-          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -q -r requirements.txt
+          python -m playwright install --with-deps chromium > /dev/null
 
-      - name: Cache voice model
+      - name: Cache models and voice reference
         uses: actions/cache@v4
         with:
-          path: ~/.cache/huggingface
-          key: kokoro-82m-v1
+          path: |
+            ~/.cache/huggingface
+            assets/voice_ref.wav
+          key: models-chatterbox-0.1.7-ref-v1
+
+      - name: Voice reference (male, made once with Kokoro)
+        run: |
+          if [ ! -f assets/voice_ref.wav ]; then
+            python -m venv /tmp/kv && /tmp/kv/bin/pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+            /tmp/kv/bin/pip install -q "kokoro>=0.9.4" soundfile
+            mkdir -p assets && /tmp/kv/bin/python scripts/make_voice_ref.py assets/voice_ref.wav am_michael
+          fi
 
       - name: Logo
         continue-on-error: true

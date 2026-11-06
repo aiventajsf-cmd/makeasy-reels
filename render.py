@@ -1,25 +1,30 @@
-"""Makeasy Spark – free Instagram Reel renderer (runs on GitHub Actions).
+"""Makeasy Spark – free Instagram Reel renderer v2 (runs on GitHub Actions, all free / open source).
 
     python render.py spec.json out/REEL.mp4
 
+v2 (Nov 2026): energetic Chatterbox voice (MIT) · captions timed to the real speech (faster-whisper) ·
+live website screenshots in a phone frame with a scroll · punch-in cuts every ~2 s · whoosh/pop SFX.
+
 Spec (JSON):
 {
-  "run_id": "spark-20261103-1900",
-  "voice": "am_michael", "speed": 1.0,          # Kokoro voice (male, free, Apache-2.0)
-  "music": "music/track1.mp3",                  # path in repo or https URL; "" = no music
+  "run_id": "spark-20261106-1930",
+  "voice_ref": "assets/voice_ref.wav",   # male reference voice Chatterbox copies (made once, see workflow)
+  "energy": 0.75,                         # Chatterbox exaggeration 0.25–1.0 (higher = more energetic)
+  "music": "",                            # repo path or https URL of a royalty-free MP3; "" = none
   "scenes": [
-    {"kind": "hook", "kicker": "Prompt fix", "title": "Better AI answers", "highlight": "in 3 steps",
-     "vo": "Stop scrolling. Your ChatGPT answers are boring because of your prompt.", "broll": "frustrated man laptop"},
-    {"kind": "step", "title": "Give it a role", "try": "You are an accountant for small shops.",
-     "vo": "Step one. Give it a role.", "broll": "accountant office desk"},
-    {"kind": "cta", "title": "Save this for your next prompt", "question": "Which step do you skip?",
-     "vo": "Save this and tell me which step you skip.", "broll": "phone scrolling social media"}
+    {"kind": "hook", "tag": "AI NEWS · THIS WEEK", "title": "3 AI updates", "highlight": "you can use today",
+     "vo": "Three AI updates from this week that you can actually use. Number three is wild!",
+     "broll": "futuristic technology city night"},
+    {"kind": "item", "num": 1, "title": "Cursor now builds AND ships your app",
+     "shot": "https://cursor.com", "vo": "...", "broll": "developer coding laptop"},
+    {"kind": "cta", "title": "Follow for daily AI updates", "question": "Which one will you try first?",
+     "vo": "...", "broll": "phone scrolling social media"}
   ]
 }
-Env: PEXELS_API_KEY (stock video), MOCK=1 (offline test: fake voice + coloured backgrounds).
-Output: 1080x1920, 30 fps, H.264 high, yuv420p, AAC 48 kHz, faststart, <= 5 Mbps (Instagram Reel spec).
+Env: PEXELS_API_KEY (stock video; without it brand-colour backgrounds are used), MOCK=1 (offline test).
+Output: 1080x1920, 30 fps, H.264 high, yuv420p, AAC 48 kHz stereo, faststart, ≤ 4.5 Mbps (Instagram Reel spec).
 """
-import json, math, os, random, re, shutil, subprocess, sys, tempfile, wave
+import json, math, os, re, shutil, subprocess, sys, tempfile, wave
 from functools import lru_cache
 
 import numpy as np
@@ -28,11 +33,13 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 W, H, FPS = 1080, 1920, 30
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT = {w: os.path.join(HERE, "fonts", f"Inter-{w}.otf") for w in ("Black", "ExtraBold", "SemiBold")}
-DEEP, MINT, SUN, WHITE = (8, 34, 31), (79, 209, 191), (255, 203, 87), (242, 247, 246)
+DEEP, MINT, SUN, WHITE, INK = (8, 34, 31), (79, 209, 191), (255, 214, 10), (250, 250, 247), (10, 14, 13)
 MOCK = os.environ.get("MOCK") == "1"
-NO_FOOTAGE = MOCK or not os.environ.get("PEXELS_API_KEY")   # no key → brand-colour backgrounds
-LEAD, TAIL = 0.30, 0.30          # pause before / after each voice line (s)
-SR = 24000                        # Kokoro sample rate
+NO_FOOTAGE = MOCK or not os.environ.get("PEXELS_API_KEY")
+SR = 24000
+LEAD, TAIL = 0.12, 0.18          # tight pacing: tiny pause before/after each line
+CUT = 2.0                         # new b-roll shot every ~2 s
+CAP_Y = 1395                      # caption centre (kept above Instagram's bottom UI zone)
 
 
 def log(*a):
@@ -46,43 +53,81 @@ def run(cmd):
     return r.stdout
 
 
-# ───────────────────────── voice (Kokoro, free & open source) ─────────────────────────
-_pipe = None
+def write_wav(path, audio, sr=SR):
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+        wf.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
 
 
-def tts(text, voice, speed):
-    """Return (float32 mono audio @24k, [(word, start_s, end_s), ...])."""
-    global _pipe
+# ───────────────────────── voice: Chatterbox (MIT) + word timing: faster-whisper ─────────────────────────
+_tts, _asr = None, None
+
+
+def tts(text, ref, energy):
+    global _tts
     if MOCK:
-        words = text.split()
-        dur = max(1.2, len(words) / 2.6)
+        dur = max(1.2, len(text.split()) / 2.9)
         t = np.linspace(0, dur, int(SR * dur), endpoint=False)
-        audio = (0.05 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
-        step = dur / len(words)
-        return audio, [(w, i * step, (i + 1) * step) for i, w in enumerate(words)]
-    if _pipe is None:
-        from kokoro import KPipeline
-        _pipe = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
-    chunks, words, offset = [], [], 0.0
-    for res in _pipe(text, voice=voice, speed=speed, split_pattern=r"\n+"):
-        audio = res.audio.cpu().numpy() if hasattr(res.audio, "cpu") else np.asarray(res.audio)
-        for tok in (getattr(res, "tokens", None) or []):
-            st, en = getattr(tok, "start_ts", None), getattr(tok, "end_ts", None)
-            word = (tok.text or "").strip()
-            if st is None or en is None or not re.search(r"\w", word):
-                if words and word and not re.search(r"\w", word):   # glue punctuation to previous word
-                    w0, s0, e0 = words[-1]
-                    words[-1] = (w0 + word, s0, e0)
-                continue
-            words.append((word, offset + st, offset + en))
-        chunks.append(audio.astype(np.float32))
-        offset += len(audio) / SR
-    audio = np.concatenate(chunks) if chunks else np.zeros(SR, np.float32)
-    if not words:  # no timestamps – spread words evenly
-        ws = text.split(); step = (len(audio) / SR) / max(1, len(ws))
-        words = [(w, i * step, (i + 1) * step) for i, w in enumerate(ws)]
+        return (0.05 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+    if _tts is None:
+        import torch
+        torch.set_num_threads(os.cpu_count() or 4)
+        from chatterbox.tts import ChatterboxTTS
+        _tts = ChatterboxTTS.from_pretrained(device="cpu")
+        if ref and os.path.exists(ref):
+            _tts.prepare_conditionals(ref, exaggeration=energy)
+    # energetic delivery: high exaggeration + low cfg keeps the pace natural (per Chatterbox docs)
+    wav = _tts.generate(text, exaggeration=energy, cfg_weight=0.35, temperature=0.8)
+    audio = wav.squeeze(0).numpy().astype(np.float32)
+    if _tts.sr != SR:
+        import librosa
+        audio = librosa.resample(audio, orig_sr=_tts.sr, target_sr=SR)
+    # trim leading/trailing silence
+    nz = np.where(np.abs(audio) > 0.01)[0]
+    if len(nz):
+        audio = audio[max(0, nz[0] - int(0.03 * SR)): nz[-1] + int(0.08 * SR)]
     peak = float(np.max(np.abs(audio))) or 1.0
-    return (audio / peak * 0.89).astype(np.float32), words
+    return (audio / peak * 0.9).astype(np.float32)
+
+
+def word_times(audio, text, tmp):
+    """Word-level timestamps of what was actually spoken."""
+    global _asr
+    words = text.split()
+    dur = len(audio) / SR
+    if not MOCK:
+        try:
+            if _asr is None:
+                from faster_whisper import WhisperModel
+                _asr = WhisperModel("base.en", device="cpu", compute_type="int8")
+            p = os.path.join(tmp, "align.wav"); write_wav(p, audio)
+            segs, _ = _asr.transcribe(p, word_timestamps=True, initial_prompt=text, language="en")
+            out = [(w.word.strip(), w.start, w.end) for s in segs for w in (s.words or []) if w.word.strip()]
+            if out:
+                return out
+        except Exception as e:  # noqa
+            log("alignment failed, spreading words evenly:", e)
+    step = dur / max(1, len(words))
+    return [(w, i * step, (i + 1) * step) for i, w in enumerate(words)]
+
+
+# ───────────────────────── sound effects (synthesised, no licence needed) ─────────────────────────
+def sfx_whoosh(d=0.32):
+    n = int(SR * d); t = np.linspace(0, 1, n)
+    noise = np.random.default_rng(7).standard_normal(n)
+    # sweeping band: simple one-pole low-pass with moving cutoff
+    out, y, a0 = np.zeros(n), 0.0, 0.02
+    for i in range(n):
+        a = a0 + 0.35 * t[i]
+        y += a * (noise[i] - y); out[i] = y
+    env = np.sin(np.pi * t) ** 1.6
+    return (out * env / (np.max(np.abs(out)) or 1) * 0.35).astype(np.float32)
+
+
+def sfx_pop(d=0.09):
+    n = int(SR * d); t = np.arange(n) / SR
+    f = 950 - 4000 * t
+    return (np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 45) * 0.28).astype(np.float32)
 
 
 # ───────────────────────── stock footage (Pexels, free) ─────────────────────────
@@ -90,9 +135,9 @@ def pexels_clips(query, n, used):
     import requests
     key = os.environ.get("PEXELS_API_KEY", "")
     out = []
-    for q in (query, "technology office", "laptop work"):
+    for q in (query, "technology abstract", "laptop work"):
         r = requests.get("https://api.pexels.com/videos/search", headers={"Authorization": key},
-                         params={"query": q, "orientation": "portrait", "size": "medium", "per_page": 15}, timeout=30)
+                         params={"query": q, "orientation": "portrait", "size": "medium", "per_page": 20}, timeout=30)
         if r.status_code != 200:
             log("pexels", r.status_code, r.text[:200]); continue
         for v in r.json().get("videos", []):
@@ -104,7 +149,7 @@ def pexels_clips(query, n, used):
                 continue
             f = min(files, key=lambda f: abs(f["height"] - 1920))
             used.add(v["id"])
-            out.append({"url": f["link"], "credit": f'{v["user"]["name"]} (Pexels)', "dur": v["duration"]})
+            out.append({"url": f["link"], "credit": f'{v["user"]["name"]} (Pexels)'})
             if len(out) >= n:
                 return out
     return out
@@ -126,20 +171,67 @@ def download(url, path):
 
 
 def make_segment(src, dur, out, idx, mock_color=None):
-    """Normalise one b-roll piece to exactly `dur` s of 1080x1920@30, slow pan + slight grade."""
-    pan = "(iw-ow)*t/%f" % max(dur, 0.1) if idx % 2 == 0 else "(iw-ow)*(1-t/%f)" % max(dur, 0.1)
-    vf = (f"scale={int(W*1.12)}:{int(H*1.12)}:force_original_aspect_ratio=increase,"
-          f"crop={W}:{H}:x='{pan}':y='(ih-oh)/2',fps={FPS},"
-          "eq=contrast=1.05:saturation=1.08:brightness=-0.02,format=yuv420p")
+    """One b-roll shot: exactly `dur` s at 1080x1920@30 with a punch-in zoom and slow drift."""
+    z = "1.0+0.14*max(0\\,1-t/0.28)+0.04*t/%f" % max(dur, 0.1)       # punch-in, then slow push
+    vf = (f"scale=w='trunc({W}*1.06*({z})/2)*2':h='trunc({H}*1.06*({z})/2)*2':eval=frame:"
+          "force_original_aspect_ratio=increase,"
+          f"crop={W}:{H}:x='(iw-ow)/2':y='(ih-oh)/2',fps={FPS},"
+          "eq=contrast=1.08:saturation=1.12:brightness=-0.03,format=yuv420p")
     if mock_color:
-        src_args = ["-f", "lavfi", "-i", f"color=c={mock_color}:s=1280x2276:r={FPS},noise=alls=12:allf=t"]
+        src_args = ["-f", "lavfi", "-i", f"color=c={mock_color}:s=1200x2134:r={FPS},noise=alls=14:allf=t"]
     else:
         src_args = ["-stream_loop", "-1", "-i", src]
     run(["ffmpeg", "-y", "-loglevel", "error", *src_args, "-t", f"{dur:.3f}", "-an", "-vf", vf,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", out])
 
 
-# ───────────────────────── text drawing ─────────────────────────
+# ───────────────────────── website screenshot (Playwright, free) ─────────────────────────
+def screenshot(url, path):
+    if MOCK:
+        img = Image.new("RGB", (1030, 2600), (245, 246, 248)); d = ImageDraw.Draw(img)
+        d.rectangle([0, 0, 1030, 150], fill=(20, 20, 24)); d.text((40, 50), url, font=font("ExtraBold", 44), fill=WHITE)
+        for i in range(12):
+            d.rounded_rectangle([40, 220 + i * 200, 990, 380 + i * 200], 24, fill=(225, 229, 235))
+        img.save(path); return path
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 412, "height": 915}, device_scale_factor=2.5, is_mobile=True,
+                        user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+                                   "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+        pg.goto(url, wait_until="domcontentloaded", timeout=45000)
+        pg.wait_for_timeout(3500)
+        for sel in ["text=/^(Accept|Accept all|I agree|Got it|Allow all|OK)$/i"]:   # close cookie banners
+            try:
+                pg.locator(sel).first.click(timeout=1500)
+            except Exception:  # noqa
+                pass
+        pg.wait_for_timeout(800)
+        pg.screenshot(path=path, full_page=True)
+        b.close()
+    img = Image.open(path).convert("RGB")
+    if img.height > 2800:
+        img.crop((0, 0, img.width, 2800)).save(path)
+    return path
+
+
+def phone_card(shot_path, w=600, h=720):
+    """Phone-style frame (RGBA) + the screenshot scaled to the frame width (scrolled at render time)."""
+    shot = Image.open(shot_path).convert("RGB")
+    sw = w - 28
+    shot = shot.resize((sw, int(shot.height * sw / shot.width)), Image.LANCZOS)
+    m = 40
+    frame = Image.new("RGBA", (w + 2 * m, h + 2 * m), (0, 0, 0, 0))
+    sh = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    ImageDraw.Draw(sh).rounded_rectangle([m, m + 14, m + w, m + h + 14], 56, fill=(0, 0, 0, 170))
+    frame.alpha_composite(sh.filter(ImageFilter.GaussianBlur(22)))
+    ImageDraw.Draw(frame).rounded_rectangle([m, m, m + w, m + h], 56, fill=(14, 16, 18, 255))
+    mask = Image.new("L", (sw, h - 28), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, sw - 1, h - 29], 44, fill=255)
+    return {"frame": frame, "shot": shot, "mask": mask, "m": m, "inner": (m + 14, m + 14), "view_h": h - 28}
+
+
+# ───────────────────────── text ─────────────────────────
 @lru_cache(maxsize=64)
 def font(weight, size):
     return ImageFont.truetype(FONT[weight], size)
@@ -158,48 +250,54 @@ def wrap(text, fnt, max_w):
     return lines
 
 
-def text_block(text, size, weight="Black", color=WHITE, max_w=920, line_h=1.06, shadow=True,
-               bg=None, pad=(0, 0), radius=0, align="left"):
-    """RGBA image of wrapped text (optional rounded background, soft shadow)."""
+def text_block(text, size, weight="Black", color=WHITE, max_w=920, line_h=1.04, shadow=True,
+               bg=None, pad=(0, 0), radius=0, align="center", marker=None):
+    """RGBA wrapped text. marker=(r,g,b) draws a highlighter box behind each line (modern Reel look)."""
     f = font(weight, size)
     lines = wrap(text, f, max_w - 2 * pad[0])
     lh = int(size * line_h)
     tw = int(max(f.getlength(l) for l in lines))
-    w, h = tw + 2 * pad[0], lh * len(lines) + 2 * pad[1] + int(size * 0.12)
-    m = 30  # margin for shadow
-    img = Image.new("RGBA", (w + 2 * m, h + 2 * m), (0, 0, 0, 0))
+    w, h = tw + 2 * pad[0], lh * len(lines) + 2 * pad[1] + int(size * 0.14)
+    m = 34
+    img = Image.new("RGBA", (w + 2 * m + 40, h + 2 * m), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     if bg:
         d.rounded_rectangle([m, m, m + w, m + h], radius=radius, fill=bg)
-    if shadow and not bg:
+
+    def xpos(l):
+        return m + pad[0] + (0 if align == "left" else (tw - f.getlength(l)) / 2)
+
+    if marker:
+        for i, l in enumerate(lines):
+            x = xpos(l)
+            d.rounded_rectangle([x - 18, m + pad[1] + i * lh + size * 0.06, x + f.getlength(l) + 18,
+                                 m + pad[1] + i * lh + size * 1.08], radius=14, fill=marker + (255,))
+    if shadow and not bg and not marker:
         sh = Image.new("RGBA", img.size, (0, 0, 0, 0)); sd = ImageDraw.Draw(sh)
         for i, l in enumerate(lines):
-            x = m + pad[0] + (0 if align == "left" else (tw - f.getlength(l)) / 2)
-            sd.text((x + 3, m + pad[1] + i * lh + 5), l, font=f, fill=(0, 0, 0, 170))
-        img = Image.alpha_composite(img, sh.filter(ImageFilter.GaussianBlur(9))); d = ImageDraw.Draw(img)
+            sd.text((xpos(l) + 3, m + pad[1] + i * lh + 6), l, font=f, fill=(0, 0, 0, 190))
+        img = Image.alpha_composite(img, sh.filter(ImageFilter.GaussianBlur(10))); d = ImageDraw.Draw(img)
     for i, l in enumerate(lines):
-        x = m + pad[0] + (0 if align == "left" else (tw - f.getlength(l)) / 2)
-        d.text((x, m + pad[1] + i * lh), l, font=f, fill=color)
+        d.text((xpos(l), m + pad[1] + i * lh), l, font=f, fill=color)
     return img, m
 
 
 def caption_img(words, active):
-    """Creator-style caption: 1–3 words, bold, white with dark outline, spoken word in mint & bigger."""
-    f = font("Black", 84)
+    """Bold creator captions: white words with dark outline, the spoken word yellow and slightly bigger."""
     parts, x = [], 0
     for i, w in enumerate(words):
+        f = font("Black", 96 if i == active else 88)
         ww = f.getlength(w.upper())
-        parts.append((x, w.upper(), i == active)); x += ww + 26
-    tw = int(x - 26) + 40
-    img = Image.new("RGBA", (tw + 60, 170), (0, 0, 0, 0))
+        parts.append((x, w.upper(), i == active, f)); x += ww + 24
+    img = Image.new("RGBA", (int(x) + 80, 190), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    for px, w, act in parts:
-        d.text((30 + px, 40), w, font=f, fill=MINT if act else WHITE,
-               stroke_width=9, stroke_fill=(8, 20, 18, 255))
+    for px, w, act, f in parts:
+        d.text((40 + px, 50 if act else 56), w, font=f, fill=SUN if act else WHITE,
+               stroke_width=10, stroke_fill=(5, 8, 8, 255))
     return img
 
 
-def chunk_words(words, max_words=3, max_chars=16):
+def chunk_words(words, max_words=3, max_chars=15):
     chunks, cur = [], []
     for w in words:
         if cur and (len(cur) >= max_words or len(" ".join(x[0] for x in cur + [w])) > max_chars
@@ -211,136 +309,144 @@ def chunk_words(words, max_words=3, max_chars=16):
     return chunks
 
 
-def gradient_overlay():
+def shade(strength):
     a = np.zeros((H, W, 4), np.uint8)
     y = np.linspace(0, 1, H)[:, None]
-    top = np.clip(1 - y / 0.22, 0, 1) * 150
-    bottom = np.clip((y - 0.42) / 0.58, 0, 1) ** 1.2 * 225
-    a[..., 3] = np.clip(top + bottom + 40, 0, 235).astype(np.uint8)
-    a[..., 0], a[..., 1], a[..., 2] = DEEP
+    top = np.clip(1 - y / 0.2, 0, 1) * 140
+    bottom = np.clip((y - 0.5) / 0.5, 0, 1) ** 1.3 * 200
+    a[..., 3] = np.clip(top + bottom + strength, 0, 235).astype(np.uint8)
+    a[..., 0], a[..., 1], a[..., 2] = (4, 10, 10)
     return Image.fromarray(a, "RGBA")
 
 
 # ───────────────────────── scene layout ─────────────────────────
-def scene_elements(sc, n_step):
-    """List of (img, x, y, appear_t, anim) for one scene; positions are top-left in px."""
-    els = []
-    k = sc["kind"]
+def scene_elements(sc, card):
+    """[(img, x, y, appear_t, anim)] – x,y = top-left px."""
+    els, k = [], sc["kind"]
+
+    def centred(img, y):
+        return (W - img.width) // 2, y
+
     if k == "hook":
-        if sc.get("kicker"):
-            im, m = text_block(sc["kicker"].upper(), 34, "ExtraBold", DEEP, bg=MINT + (255,), pad=(26, 14), radius=40, shadow=False)
-            els.append((im, 86 - m, 560 - m, 0.0, "fade"))
-        im, m = text_block(sc["title"], 118, "Black", WHITE, max_w=940)
-        els.append((im, 80 - m, 640 - m, 0.05, "pop"))
-        y2 = 640 + im.size[1] - 2 * m + 6
+        if sc.get("tag"):
+            im, _ = text_block(sc["tag"].upper(), 34, "ExtraBold", INK, bg=MINT + (255,), pad=(28, 14), radius=40, shadow=False)
+            els.append((im, *centred(im, 560), 0.0, "pop"))
+        im, _ = text_block(sc["title"], 132, "Black", WHITE, max_w=960)
+        els.append((im, *centred(im, 650), 0.0, "pop"))
         if sc.get("highlight"):
-            im2, m2 = text_block(sc["highlight"], 118, "Black", MINT, max_w=940)
-            els.append((im2, 80 - m2, y2 - m2, 0.3, "pop"))
-    elif k == "step":
-        num, m = text_block(f"{n_step:02d}", 300, "Black", (0, 0, 0, 0), shadow=False)
-        d = ImageDraw.Draw(num)
-        d.text((m, m), f"{n_step:02d}", font=font("Black", 300), fill=(0, 0, 0, 0), stroke_width=5, stroke_fill=MINT + (255,))
-        els.append((num, 70 - m, 250 - m, 0.0, "fade"))
-        im, m = text_block(sc["title"], 104, "Black", WHITE, max_w=940)
-        els.append((im, 80 - m, 600 - m, 0.08, "slide"))
-        if sc.get("try"):
-            y = 600 + im.size[1] - 2 * m + 40
-            lab, ml = text_block("TRY THIS", 30, "ExtraBold", MINT, shadow=False)
-            els.append((lab, 84 - ml, y - ml, 0.4, "fade"))
-            card, mc = text_block(sc["try"], 50, "SemiBold", WHITE, max_w=900, bg=(8, 34, 31, 215), pad=(34, 26), radius=28, line_h=1.25)
-            els.append((card, 80 - mc, y + 52 - mc, 0.5, "slide"))
+            im2, _ = text_block(sc["highlight"], 92, "Black", INK, max_w=940, marker=SUN, shadow=False)
+            els.append((im2, *centred(im2, 650 + im.height - 40), 0.35, "pop"))
+    elif k == "item":
+        badge, _ = text_block(f"#{sc.get('num', 1)}", 54, "Black", INK, bg=SUN + (255,), pad=(26, 8), radius=22, shadow=False)
+        els.append((badge, *centred(badge, 250), 0.0, "pop"))
+        im, _ = text_block(sc["title"], 74, "Black", WHITE, max_w=940)
+        els.append((im, *centred(im, 352), 0.08, "slide"))
     else:  # cta
-        im, m = text_block(sc["title"], 104, "Black", WHITE, max_w=880)
-        els.append((im, 80 - m, 420 - m, 0.0, "slide"))
-        y = 420 + im.size[1] - 2 * m + 40
-        tag, mt = text_block("SAVE  ·  SEND  ·  FOLLOW", 40, "ExtraBold", MINT, shadow=False)
-        els.append((tag, 84 - mt, y - mt, 0.35, "fade"))
+        im, _ = text_block(sc["title"], 104, "Black", WHITE, max_w=940)
+        els.append((im, *centred(im, 520), 0.0, "pop"))
         if sc.get("question"):
-            q, mq = text_block(sc["question"], 58, "ExtraBold", DEEP, max_w=880, bg=SUN + (255,), pad=(34, 26), radius=30, shadow=False)
-            els.append((q, 80 - mq, y + 90 - mq, 0.6, "pop"))
+            q, _ = text_block(sc["question"], 60, "Black", INK, max_w=900, marker=SUN, shadow=False)
+            els.append((q, *centred(q, 520 + im.height + 10), 0.4, "pop"))
     return els
 
 
 def anim(kind, t):
-    """(alpha 0..1, dy px, scale) for an element `t` s after it appears."""
-    p = min(1.0, max(0.0, t / 0.35))
+    p = min(1.0, max(0.0, t / 0.3))
     e = 1 - (1 - p) ** 3
     if kind == "slide":
-        return e, int((1 - e) * 70), 1.0
+        return e, int((1 - e) * 80), 1.0
     if kind == "pop":
-        s = 0.8 + 0.2 * (1 - (1 - p) ** 3) + 0.05 * math.sin(p * math.pi) * (p < 1)
-        return e, 0, s
+        return min(1, p * 2), 0, 0.7 + 0.3 * e + 0.08 * math.sin(p * math.pi)
     return e, 0, 1.0
+
+
+def blit(frame, img, x, y, a=1.0, s=1.0, dy=0):
+    im = img
+    if s != 1.0:
+        im = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))), Image.BILINEAR)
+        x, y = x + (img.width - im.width) // 2, y + (img.height - im.height) // 2
+    if a < 1:
+        im = im.copy(); im.putalpha(im.getchannel("A").point(lambda v, a=a: int(v * a)))
+    frame.alpha_composite(im, (int(x), int(y + dy)))
 
 
 # ───────────────────────── main ─────────────────────────
 def main(spec_path, out_path):
     spec = json.load(open(spec_path))
-    voice, speed = spec.get("voice", "am_michael"), float(spec.get("speed", 1.0))
     scenes = spec["scenes"]
+    ref = os.path.join(HERE, spec.get("voice_ref") or "assets/voice_ref.wav")
+    energy = float(spec.get("energy", 0.75))
     tmp = tempfile.mkdtemp(prefix="reel_")
-    log("tmp", tmp)
 
-    # 1 voice per scene → timeline
-    t, voice_track, timeline, credits = 0.0, [], [], []
-    for i, sc in enumerate(scenes):
-        audio, words = tts(sc["vo"], voice, speed)
-        vdur = len(audio) / SR
-        dur = LEAD + vdur + TAIL
-        voice_track += [np.zeros(int(LEAD * SR), np.float32), audio, np.zeros(int(TAIL * SR), np.float32)]
+    # 1 · voice + word timing → timeline
+    t, track, timeline = 0.0, [], []
+    for sc in scenes:
+        audio = tts(sc["vo"], ref, energy)
+        words = word_times(audio, sc["vo"], tmp)
+        dur = LEAD + len(audio) / SR + TAIL
+        track += [np.zeros(int(LEAD * SR), np.float32), audio, np.zeros(int(TAIL * SR), np.float32)]
         timeline.append({"start": t, "dur": dur, "words": [(w, t + LEAD + s, t + LEAD + e) for w, s, e in words]})
         t += dur
+        log(f"voice scene {len(timeline)}: {dur:.1f}s")
     total = t
-    log(f"voice done – {total:.1f}s")
-    vo = np.concatenate(voice_track)
-    with wave.open(os.path.join(tmp, "voice.wav"), "wb") as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SR)
-        wf.writeframes((np.clip(vo, -1, 1) * 32767).astype(np.int16).tobytes())
+    vo = np.concatenate(track)
 
-    # 2 b-roll: one new clip every ~2.5 s
-    used, seg_paths, idx = set(), [], 0
-    palette = ["#0f3d38", "#1d2b4a", "#3a2a1a", "#123a2c", "#2b1d3a"]
+    # 2 · b-roll: a new shot every ~2 s (pattern interrupts)
+    used, segs, cuts, credits, idx = set(), [], [], [], 0
+    palette = ["#0f3d38", "#1d2b4a", "#3a2a1a", "#123a2c", "#2b1d3a", "#14313d"]
     for i, (sc, tl) in enumerate(zip(scenes, timeline)):
-        n = max(1, round(tl["dur"] / 2.6))
+        n = max(1, round(tl["dur"] / CUT))
         clips = [] if NO_FOOTAGE else pexels_clips(sc.get("broll") or "technology", n, used)
-        if not NO_FOOTAGE and not clips:
-            raise RuntimeError(f"no stock footage found for scene {i+1}")
         part = tl["dur"] / n
         for j in range(n):
             src = None
             if clips:
                 c = clips[j % len(clips)]
-                src = download(c["url"], os.path.join(tmp, f"src_{i}_{j}.mp4"))
-                credits.append(c["credit"])
+                src = download(c["url"], os.path.join(tmp, f"src_{i}_{j}.mp4")); credits.append(c["credit"])
             seg = os.path.join(tmp, f"seg_{idx:03d}.mp4")
-            make_segment(src, part, seg, idx, mock_color=palette[idx % len(palette)] if NO_FOOTAGE else None)
-            seg_paths.append(seg); idx += 1
+            make_segment(src, part, seg, idx, mock_color=None if clips else palette[idx % len(palette)])
+            segs.append(seg); cuts.append(tl["start"] + j * part); idx += 1
     with open(os.path.join(tmp, "list.txt"), "w") as fh:
-        fh.writelines(f"file '{p}'\n" for p in seg_paths)
+        fh.writelines(f"file '{p}'\n" for p in segs)
     bg = os.path.join(tmp, "bg.mp4")
-    run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", os.path.join(tmp, "list.txt"),
-         "-c", "copy", bg])
-    log(f"b-roll done – {len(seg_paths)} clips")
+    run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", os.path.join(tmp, "list.txt"), "-c", "copy", bg])
+    log(f"b-roll: {len(segs)} shots")
 
-    # 3 overlays
-    shade = gradient_overlay()
-    logo = None
-    lp = os.path.join(HERE, "assets", "logo-dark.png")
-    if os.path.exists(lp):
-        logo = Image.open(lp).convert("RGBA")
-        logo.thumbnail((300, 76))
-    n_step, scene_els = 0, []
-    for sc, tl in zip(scenes, timeline):
-        if sc["kind"] == "step":
-            n_step += 1
-        scene_els.append(scene_elements(sc, n_step))
-    cap_events = []  # (start, end, chunk_words, active_idx)
+    # 3 · SFX on cuts and pops → mix into voice track
+    whoosh, pop = sfx_whoosh(), sfx_pop()
+    fx = np.zeros(len(vo) + SR, np.float32)
+    for k, ct in enumerate(cuts):
+        if k == 0:
+            continue
+        i0 = max(0, int((ct - 0.16) * SR)); fx[i0:i0 + len(whoosh)] += whoosh[: len(fx) - i0]
+    for tl in timeline:
+        i0 = int(tl["start"] * SR); fx[i0:i0 + len(pop)] += pop[: len(fx) - i0]
+    mix = vo + fx[: len(vo)] * 0.8
+    write_wav(os.path.join(tmp, "voice.wav"), mix / max(1.0, float(np.max(np.abs(mix)))))
+
+    # 4 · overlays
+    cards = []
+    for sc in scenes:
+        c = None
+        if sc.get("shot"):
+            try:
+                c = phone_card(screenshot(sc["shot"], os.path.join(tmp, f"shot_{len(cards)}.png")))
+            except Exception as e:  # noqa
+                log("screenshot failed:", sc["shot"], e)
+        cards.append(c)
+    els = [scene_elements(sc, c) for sc, c in zip(scenes, cards)]
+    shades = {False: shade(40), True: shade(95)}
+    caps = []
     for tl in timeline:
         for ch in chunk_words(tl["words"]):
             for k, (w, s, e) in enumerate(ch):
-                nxt = ch[k + 1][1] if k + 1 < len(ch) else e + 0.12
-                cap_events.append((s, nxt, tuple(x[0] for x in ch), k))
+                nxt = ch[k + 1][1] if k + 1 < len(ch) else e + 0.1
+                caps.append((s, nxt, tuple(x[0] for x in ch), k))
     cap_cache = {}
+    logo = None
+    lp = os.path.join(HERE, "assets", "logo-dark.png")
+    if os.path.exists(lp):
+        logo = Image.open(lp).convert("RGBA"); logo.thumbnail((260, 66))
 
     music = spec.get("music") or ""
     if music.startswith("http"):
@@ -349,64 +455,62 @@ def main(spec_path, out_path):
         music = os.path.join(HERE, music)
     music = music if music and os.path.exists(music) else ""
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     dec = subprocess.Popen(["ffmpeg", "-loglevel", "quiet", "-i", bg, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                            stdout=subprocess.PIPE)
     enc_cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                "-r", str(FPS), "-i", "-", "-i", os.path.join(tmp, "voice.wav")]
     if music:
         enc_cmd += ["-stream_loop", "-1", "-i", music]
-        afilter = (f"[1:a]aresample=48000,volume=1.0[v];[2:a]aresample=48000,volume=0.13,"
-                   f"afade=t=out:st={max(0, total-1.5):.2f}:d=1.5[m];[v][m]amix=inputs=2:duration=first:normalize=0,"
-                   "alimiter=limit=0.95[a]")
+        af = (f"[1:a]aresample=48000[v];[2:a]aresample=48000,volume=0.12,afade=t=out:st={max(0, total-1.2):.2f}:d=1.2[m];"
+              "[v][m]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]")
     else:
-        afilter = "[1:a]aresample=48000[a]"
-    enc_cmd += ["-filter_complex", afilter, "-map", "0:v", "-map", "[a]", "-t", f"{total:.3f}",
-                "-c:v", "libx264", "-profile:v", "high", "-preset", "medium", "-crf", "20",
+        af = "[1:a]aresample=48000[a]"
+    enc_cmd += ["-filter_complex", af, "-map", "0:v", "-map", "[a]", "-t", f"{total:.3f}",
+                "-c:v", "libx264", "-profile:v", "high", "-preset", "medium", "-crf", "19",
                 "-maxrate", "4500k", "-bufsize", "9000k", "-pix_fmt", "yuv420p", "-g", "60",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", out_path]
+                "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", out_path]
     enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE)
 
-    nframes = int(total * FPS)
-    fsize = W * H * 3
+    nframes, fsize = int(total * FPS), W * H * 3
     for fi in range(nframes):
         raw = dec.stdout.read(fsize)
         if len(raw) < fsize:
             break
         tt = fi / FPS
-        frame = Image.frombuffer("RGB", (W, H), raw, "raw", "RGB", 0, 1).convert("RGBA")
-        frame.alpha_composite(shade)
         si = next(i for i, tl in enumerate(timeline) if tt < tl["start"] + tl["dur"] or i == len(timeline) - 1)
         local = tt - timeline[si]["start"]
-        for img, x, y, appear, kind in scene_els[si]:
-            if local < appear:
-                continue
-            a, dy, s = anim(kind, local - appear)
-            im = img
-            if s != 1.0:
-                im = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))), Image.BILINEAR)
-                x2, y2 = x + (img.width - im.width) // 2, y + (img.height - im.height) // 2
-            else:
-                x2, y2 = x, y
-            if a < 1:
-                im = im.copy(); im.putalpha(im.getchannel("A").point(lambda v, a=a: int(v * a)))
-            frame.alpha_composite(im, (int(x2), int(y2 + dy)))
-        for s0, e0, ws, act in cap_events:
+        card = cards[si]
+        frame = Image.frombuffer("RGB", (W, H), raw, "raw", "RGB", 0, 1).convert("RGBA")
+        frame.alpha_composite(shades[card is not None])
+        for img, x, y, appear, kind in els[si]:
+            if local >= appear:
+                a, dy, s = anim(kind, local - appear)
+                blit(frame, img, x, y, a, s, dy)
+        if card:   # phone mockup slides up, then the page scrolls like a screen recording
+            p = min(1.0, max(0.0, (local - 0.15) / 0.4)); e = 1 - (1 - p) ** 3
+            fr = card["frame"]; fx0 = (W - fr.width) // 2; fy0 = 585 - card["m"] + int((1 - e) * 500)
+            if p > 0:
+                f2 = fr.copy()
+                maxs = max(0, card["shot"].height - card["view_h"])
+                off = int(min(maxs, max(0.0, local - 0.9) * 190))
+                view = card["shot"].crop((0, off, card["shot"].width, off + card["view_h"]))
+                f2.paste(view, card["inner"], card["mask"])
+                blit(frame, f2, fx0, fy0, a=min(1, p * 2))
+        for s0, e0, ws, act in caps:
             if s0 <= tt < e0:
                 key = (ws, act)
                 if key not in cap_cache:
                     cap_cache[key] = caption_img(ws, act)
                 ci = cap_cache[key]
-                p = min(1, (tt - s0) / 0.08)
-                sc_ = 0.92 + 0.08 * p
-                ci2 = ci.resize((int(ci.width * sc_), int(ci.height * sc_)), Image.BILINEAR) if sc_ < 1 else ci
-                frame.alpha_composite(ci2, ((W - ci2.width) // 2, int(H * 0.70) - ci2.height // 2))
+                sc_ = 0.9 + 0.1 * min(1, (tt - s0) / 0.07)
+                blit(frame, ci, (W - ci.width) // 2, CAP_Y - ci.height // 2, s=sc_)
                 break
         if logo:
-            frame.alpha_composite(logo, (80, 92))
-        bar = Image.new("RGBA", (W - 160, 8), (255, 255, 255, 55))
-        ImageDraw.Draw(bar).rounded_rectangle([0, 0, max(8, int((W - 160) * tt / total)), 7], radius=4, fill=MINT + (255,))
-        frame.alpha_composite(bar, (80, 186))
+            frame.alpha_composite(logo, ((W - logo.width) // 2, 96))
+        bar = Image.new("RGBA", (W - 200, 7), (255, 255, 255, 50))
+        ImageDraw.Draw(bar).rounded_rectangle([0, 0, max(7, int((W - 200) * tt / total)), 6], radius=3, fill=SUN + (255,))
+        frame.alpha_composite(bar, (100, 186))
         enc.stdin.write(frame.convert("RGB").tobytes())
         if fi % 150 == 0:
             log(f"frame {fi}/{nframes}")
@@ -414,7 +518,7 @@ def main(spec_path, out_path):
     if enc.returncode != 0:
         raise RuntimeError("encoder failed")
     info = {"duration": round(total, 2), "frames": nframes, "credits": sorted(set(credits)),
-            "size_mb": round(os.path.getsize(out_path) / 1e6, 2), "voice": voice}
+            "size_mb": round(os.path.getsize(out_path) / 1e6, 2), "voice": "chatterbox", "energy": energy}
     json.dump(info, open(out_path + ".json", "w"))
     log("done", info)
     shutil.rmtree(tmp, ignore_errors=True)

@@ -1,5 +1,5 @@
-kokoro>=0.9.4
-soundfile
-numpy
-pillow
+chatterbox-tts==0.1.7
+faster-whisper
+playwright
 requests
+pillow

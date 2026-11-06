@@ -1,0 +1,26 @@
+{
+  "run_id": "test-ai-news-1",
+  "voice_ref": "assets/voice_ref.wav",
+  "energy": 0.8,
+  "music": "",
+  "scenes": [
+    {"kind": "hook", "tag": "AI news · this week", "title": "3 AI updates", "highlight": "you can use today",
+     "vo": "Three AI updates from this week that you can actually use. Number one is crazy!",
+     "broll": "futuristic technology neon city night"},
+    {"kind": "item", "num": 1, "title": "Cursor now builds AND launches your app",
+     "shot": "https://cursor.com",
+     "vo": "Cursor's new cloud agent builds a web app from plain English, and then puts it live for you.",
+     "broll": "programmer coding laptop dark"},
+    {"kind": "item", "num": 2, "title": "Google's AI video just got 30% cheaper",
+     "shot": "https://gemini.google.com",
+     "vo": "Google's new Gemini video model makes fifteen second clips, and it just got thirty percent cheaper.",
+     "broll": "video editing creator studio"},
+    {"kind": "item", "num": 3, "title": "Perplexity's AI 'Teammates' work for you 24/7",
+     "shot": "https://www.perplexity.ai",
+     "vo": "And Perplexity launched Teammates. Always-on AI agents that handle your work tasks while you sleep.",
+     "broll": "office team working computers"},
+    {"kind": "cta", "title": "Follow for daily AI updates", "question": "Which one will you try first?",
+     "vo": "Follow for daily AI updates, and comment which one you'll try first!",
+     "broll": "woman smiling phone scrolling"}
+  ]
+}
