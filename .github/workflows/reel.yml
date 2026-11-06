@@ -31,17 +31,28 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: System packages
-        timeout-minutes: 6
+      - name: System packages (static ffmpeg from GitHub; apt only as fallback)
+        timeout-minutes: 8
         run: |
-          command -v ffmpeg || (sudo timeout 300 apt-get update -qq -o Acquire::Retries=3 && sudo timeout 300 apt-get install -y -qq ffmpeg > /dev/null)
+          if ! command -v ffmpeg; then
+            for i in 1 2 3; do
+              curl -fsSL --retry 3 -o /tmp/ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz && break
+              sleep 10
+            done
+            if [ -s /tmp/ff.tar.xz ]; then
+              mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1
+              echo "/tmp/ff/bin" >> "$GITHUB_PATH" && export PATH="/tmp/ff/bin:$PATH"
+            else
+              sudo timeout 240 apt-get update -qq -o Acquire::Retries=3 && sudo timeout 240 apt-get install -y -qq ffmpeg > /dev/null
+            fi
+          fi
           ffmpeg -version | head -1
 
       - name: Python packages
         run: |
           pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -q -r requirements.txt
-          python -m playwright install --with-deps chromium > /dev/null
+          for i in 1 2 3; do timeout 600 python -m playwright install --with-deps chromium > /dev/null && break; echo "playwright retry $i"; sleep 20; done
 
       - name: Cache models and voice reference
         uses: actions/cache@v4
