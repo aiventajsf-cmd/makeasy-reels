@@ -8,7 +8,15 @@ Tools  : Applio (RVC, MIT) for the voice model · Indic Parler-TTS (Apache-2.0, 
 import glob, json, os, shutil, subprocess, sys, time
 
 T0 = time.time()
-IN = "/kaggle/input/makeasy-clone-private"
+def find_input():
+    for root, _, files in os.walk("/kaggle/input"):
+        if "voice_train.wav" in files:
+            return root
+    print("input tree:", [r for r, _, _ in os.walk("/kaggle/input")][:30], flush=True)
+    raise SystemExit("voice_train.wav not found under /kaggle/input")
+
+
+IN = find_input()
 WORK = "/kaggle/working"
 TMP = "/kaggle/tmp"
 EPOCHS = int(os.environ.get("EPOCHS", "220"))
@@ -51,6 +59,7 @@ sh(f"{PY} core.py prerequisites --pretraineds-hifigan --models --no-exe", cwd=A)
 ds = f"{TMP}/dataset"
 os.makedirs(ds, exist_ok=True)
 shutil.copy(f"{IN}/voice_train.wav", f"{ds}/junaid.wav")
+shutil.copy(f"{IN}/voice_ref.wav", f"{TMP}/voice_ref.wav")
 sh(f"{PY} core.py preprocess --model-name junaid --dataset-path {ds} --sample-rate 40000 --cpu-cores 4 "
    f"--cut-preprocess Automatic --chunk-len 3.0 --overlap-len 0.3 --normalization-mode post", cwd=A)
 sh(f"{PY} core.py extract --model-name junaid --f0-method rmvpe --cpu-cores 4 --gpu 0 --sample-rate 40000 "
@@ -124,7 +133,7 @@ import json, torchaudio
 from chatterbox.tts import ChatterboxTTS
 m = ChatterboxTTS.from_pretrained(device="cuda")
 for k, text in json.load(open("/kaggle/tmp/lines.json")).items():
-    w = m.generate(text, audio_prompt_path="/kaggle/input/makeasy-clone-private/voice_ref.wav", exaggeration=0.8, cfg_weight=0.35)
+    w = m.generate(text, audio_prompt_path="/kaggle/tmp/voice_ref.wav", exaggeration=0.8, cfg_weight=0.35)
     torchaudio.save(f"/kaggle/tmp/base_chatterbox_{k}.wav", w, m.sr)
 print("chatterbox done")
 ''')
