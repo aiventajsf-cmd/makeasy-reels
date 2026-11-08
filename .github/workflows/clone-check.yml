@@ -10,6 +10,9 @@ on:
         required: false
         default: "Hi, I'm Junaid, and this is the first time I'm showing my face on Makeasy AI. For the last few days, every post on this page was made by AI agents that I built myself."
 
+permissions:
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -62,8 +65,14 @@ jobs:
           done
           rm -f /tmp/k.bin
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: voice-sample-encrypted
-          path: /tmp/outenc
-          retention-days: 3
+      - name: Push encrypted samples to private-out
+        run: |
+          set -e
+          git config user.name "Makeasy Spark"; git config user.email "actions@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin private-out > /dev/null; then
+            git fetch -q --depth 1 origin private-out && git checkout -q -B private-out FETCH_HEAD
+          else
+            git checkout -q --orphan private-out && git rm -rq --cached . && git clean -fdxq
+          fi
+          mkdir -p out && cp /tmp/outenc/* out/
+          git add out && git commit -qm "encrypted voice samples ${{ github.run_id }}" && git push -q origin private-out
