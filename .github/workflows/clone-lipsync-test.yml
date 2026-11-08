@@ -53,7 +53,7 @@ jobs:
           set -e
           T0=$(date +%s)
           python -m venv /tmp/cb
-          /tmp/cb/bin/pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          /tmp/cb/bin/pip install -q -U pip && /tmp/cb/bin/pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
           /tmp/cb/bin/pip install -q chatterbox-tts==0.1.7
           /tmp/cb/bin/python - <<'EOF'
           import os, torchaudio
@@ -71,7 +71,7 @@ jobs:
           set -e
           T0=$(date +%s)
           git clone -q --depth 1 https://github.com/TMElyralab/MuseTalk.git /tmp/mt
-          pip install -q torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
           pip install -q diffusers==0.30.2 accelerate==0.28.0 numpy==1.23.5 opencv-python==4.9.0.80 soundfile==0.12.1 \
             transformers==4.39.2 huggingface_hub==0.30.2 librosa==0.11.0 einops==0.8.1 omegaconf mediapipe==0.10.14 gdown
           cd /tmp/mt
