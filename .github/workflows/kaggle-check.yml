@@ -1,0 +1,43 @@
+name: Kaggle GPU check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Kaggle CLI auth
+        run: |
+          pip install -q "kaggle>=1.8.0"
+          [ -n "$KAGGLE_API_TOKEN" ] || { echo "KAGGLE_API_TOKEN missing"; exit 1; }
+          [ -n "$KAGGLE_USERNAME" ] || { echo "KAGGLE_USERNAME missing"; exit 1; }
+          echo "username length ${#KAGGLE_USERNAME}"
+          kaggle kernels list --mine --page-size 5 || true
+      - name: Push GPU test kernel
+        run: |
+          set -e
+          mkdir -p /tmp/k && cp kaggle/gpu-check/run.py /tmp/k/
+          cat > /tmp/k/kernel-metadata.json <<JSON
+          {"id": "$KAGGLE_USERNAME/makeasy-gpu-check", "title": "makeasy-gpu-check", "code_file": "run.py",
+           "language": "python", "kernel_type": "script", "is_private": true, "enable_gpu": true,
+           "enable_internet": true, "dataset_sources": [], "competition_sources": [], "kernel_sources": []}
+          JSON
+          kaggle kernels push -p /tmp/k
+      - name: Wait and fetch output
+        run: |
+          for i in $(seq 1 60); do
+            s=$(kaggle kernels status "$KAGGLE_USERNAME/makeasy-gpu-check" 2>&1 | tail -1); echo "$s"
+            case "$s" in *complete*|*COMPLETE*) break;; *error*|*ERROR*|*cancel*) break;; esac
+            sleep 20
+          done
+          mkdir -p /tmp/o && kaggle kernels output "$KAGGLE_USERNAME/makeasy-gpu-check" -p /tmp/o || true
+          cat /tmp/o/gpu.json 2>/dev/null || ls -la /tmp/o; cat /tmp/o/*.log 2>/dev/null | tail -20
