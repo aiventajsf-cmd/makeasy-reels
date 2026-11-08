@@ -1,0 +1,68 @@
+name: Clone assets check + voice clone sample
+
+# Decrypts the private face/voice files (CLONE_KEY secret), verifies them, and makes a short
+# voice-clone sample. The sample is encrypted again before upload, so nothing private is public.
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Line for the voice-clone sample"
+        required: false
+        default: "Hi, I'm Junaid, and this is the first time I'm showing my face on Makeasy AI. For the last few days, every post on this page was made by AI agents that I built myself."
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Decrypt and verify private files
+        env:
+          CLONE_KEY: ${{ secrets.CLONE_KEY }}
+        run: |
+          set -e
+          [ -n "$CLONE_KEY" ] || { echo "CLONE_KEY secret missing"; exit 1; }
+          printf '%s' "$CLONE_KEY" | tr -d '\r\n ' > /tmp/k.bin
+          mkdir -p /tmp/priv
+          for f in voice_ref.wav face_base.mp4; do
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in assets/private/junaid_$f.enc -out /tmp/priv/$f -pass file:/tmp/k.bin
+          done
+          cd /tmp/priv && sha256sum -c "$GITHUB_WORKSPACE/assets/private.sha256"
+
+      - name: Voice clone sample (Chatterbox)
+        env:
+          TEXT: ${{ inputs.text }}
+        run: |
+          set -e
+          pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q chatterbox-tts==0.1.7
+          python - <<'EOF'
+          import os, torch, torchaudio
+          from chatterbox.tts import ChatterboxTTS
+          m = ChatterboxTTS.from_pretrained(device="cpu")
+          for name, ex, cfg in [("calm", 0.5, 0.5), ("energetic", 0.75, 0.35)]:
+              wav = m.generate(os.environ["TEXT"], audio_prompt_path="/tmp/priv/voice_ref.wav", exaggeration=ex, cfg_weight=cfg)
+              torchaudio.save(f"/tmp/priv/sample_{name}.wav", wav, m.sr)
+              print(name, round(wav.shape[-1] / m.sr, 1), "s")
+          EOF
+
+      - name: Encrypt sample for download
+        run: |
+          set -e
+          mkdir -p /tmp/outenc
+          for f in sample_calm.wav sample_energetic.wav; do
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in /tmp/priv/$f -out /tmp/outenc/$f.enc -pass file:/tmp/k.bin
+          done
+          rm -f /tmp/k.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-sample-encrypted
+          path: /tmp/outenc
+          retention-days: 3
