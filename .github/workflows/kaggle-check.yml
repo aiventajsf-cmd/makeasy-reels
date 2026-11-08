@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
       - name: Kaggle CLI auth
         run: |
-          pip install -q "kaggle>=1.8.0"
+          pip install -q "kaggle>=1.8.0" six
           [ -n "$KAGGLE_API_TOKEN" ] || { echo "KAGGLE_API_TOKEN missing"; exit 1; }
           [ -n "$KAGGLE_USERNAME" ] || { echo "KAGGLE_USERNAME missing"; exit 1; }
           echo "username length ${#KAGGLE_USERNAME}"
