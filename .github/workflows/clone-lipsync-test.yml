@@ -41,7 +41,7 @@ jobs:
           printf '%s' "$CLONE_KEY" | tr -d '\r\n ' > /tmp/k.bin
           echo "key length $(wc -c < /tmp/k.bin), fingerprint $(sha256sum /tmp/k.bin | cut -c1-8)"
           mkdir -p /tmp/priv
-          for f in voice_ref.wav face_base.mp4; do
+          for f in voice_ref.wav face_base.mp4 voice_train.wav; do
             openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in assets/private/junaid_$f.enc -out /tmp/priv/$f -pass file:/tmp/k.bin
           done
           cd /tmp/priv && sha256sum -c "$GITHUB_WORKSPACE/assets/private.sha256"
