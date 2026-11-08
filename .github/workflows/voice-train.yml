@@ -1,0 +1,110 @@
+name: Train Junaid voice (Kaggle GPU)
+
+# Decrypts the private voice recordings, uploads them as a PRIVATE Kaggle dataset, runs the training
+# kernel on Kaggle's free T4 GPU, then downloads the model + samples, encrypts them and stores them on
+# the private-out branch. Nothing private is ever stored unencrypted on GitHub.
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Training epochs"
+        required: false
+        default: "220"
+
+permissions:
+  contents: write
+
+env:
+  KAGGLE_USERNAME: aiventa
+  KAGGLE_RAW: ${{ secrets.KAGGLE_API_TOKEN }}
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Kaggle CLI + decrypt
+        env:
+          CLONE_KEY: ${{ secrets.CLONE_KEY }}
+        run: |
+          set -e
+          pip install -q "kaggle>=1.8.0" six
+          T=$(printf '%s' "$KAGGLE_RAW" | sed 's/.*=//' | tr -d "[:space:]\"'")
+          echo "::add-mask::$T"; echo "KAGGLE_API_TOKEN=$T" >> "$GITHUB_ENV"
+          printf '%s' "$CLONE_KEY" | tr -d '\r\n ' > /tmp/k.bin
+          mkdir -p /tmp/ds
+          for f in voice_train.wav voice_ref.wav; do
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in assets/private/junaid_$f.enc -out /tmp/ds/$f -pass file:/tmp/k.bin
+          done
+          ls -la /tmp/ds
+
+      - name: Private Kaggle dataset (create or new version)
+        run: |
+          set -e
+          cat > /tmp/ds/dataset-metadata.json <<JSON
+          {"title": "makeasy-clone-private", "id": "$KAGGLE_USERNAME/makeasy-clone-private", "licenses": [{"name": "other"}]}
+          JSON
+          if kaggle datasets status "$KAGGLE_USERNAME/makeasy-clone-private" > /dev/null 2>&1; then
+            kaggle datasets version -p /tmp/ds -m "update $GITHUB_RUN_ID" -q
+          else
+            kaggle datasets create -p /tmp/ds -q
+          fi
+          for i in $(seq 1 40); do
+            s=$(kaggle datasets status "$KAGGLE_USERNAME/makeasy-clone-private" 2>&1 | tail -1); echo "$s"
+            case "$s" in *ready*|*READY*) break;; esac; sleep 15
+          done
+          rm -rf /tmp/ds
+
+      - name: Push training kernel (GPU)
+        run: |
+          set -e
+          mkdir -p /tmp/k && cp kaggle/voice-train/run.py /tmp/k/
+          sed -i "s/os.environ.get(\"EPOCHS\", \"220\")/os.environ.get(\"EPOCHS\", \"${{ inputs.epochs }}\")/" /tmp/k/run.py
+          cat > /tmp/k/kernel-metadata.json <<JSON
+          {"id": "$KAGGLE_USERNAME/makeasy-voice-train", "title": "makeasy-voice-train", "code_file": "run.py",
+           "language": "python", "kernel_type": "script", "is_private": true, "enable_gpu": true,
+           "enable_internet": true, "dataset_sources": ["$KAGGLE_USERNAME/makeasy-clone-private"],
+           "competition_sources": [], "kernel_sources": []}
+          JSON
+          kaggle kernels push -p /tmp/k
+
+      - name: Wait for training (up to ~4.5 h)
+        run: |
+          sleep 60
+          for i in $(seq 1 540); do
+            s=$(kaggle kernels status "$KAGGLE_USERNAME/makeasy-voice-train" 2>&1 | tail -1)
+            [ $((i % 10)) -eq 1 ] && echo "$(date -u +%H:%M) $s"
+            case "$s" in *COMPLETE*|*complete*) echo "$s"; break;; *ERROR*|*error*|*CANCEL*|*cancel*) echo "$s"; break;; esac
+            sleep 30
+          done
+
+      - name: Download, encrypt, store on private-out
+        if: always()
+        run: |
+          set +e
+          mkdir -p /tmp/o && kaggle kernels output "$KAGGLE_USERNAME/makeasy-voice-train" -p /tmp/o -q
+          ls -laR /tmp/o | head -40
+          cat /tmp/o/status.json 2>/dev/null | tail -15
+          tail -c 4000 /tmp/o/makeasy-voice-train.log 2>/dev/null
+          mkdir -p /tmp/enc
+          cp /tmp/o/status.json /tmp/enc/voice_train_status.json 2>/dev/null
+          [ -f /tmp/o/junaid_voice.zip ] && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in /tmp/o/junaid_voice.zip -out /tmp/enc/junaid_voice.zip.enc -pass file:/tmp/k.bin
+          if [ -d /tmp/o/samples ]; then
+            (cd /tmp/o && zip -qr /tmp/samples.zip samples)
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in /tmp/samples.zip -out /tmp/enc/voice_samples.zip.enc -pass file:/tmp/k.bin
+          fi
+          rm -f /tmp/k.bin
+          git config user.name "Makeasy Spark"; git config user.email "actions@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin private-out > /dev/null; then
+            git fetch -q --depth 1 origin private-out && git checkout -q -B private-out FETCH_HEAD
+          else
+            git checkout -q --orphan private-out && git rm -rq --cached . && git clean -fdxq
+          fi
+          mkdir -p out && cp /tmp/enc/* out/ 2>/dev/null
+          git add out && git commit -qm "encrypted voice model + samples $GITHUB_RUN_ID" && git push -q origin private-out
+          ls -la /tmp/enc
