@@ -20,7 +20,8 @@ jobs:
           pip install -q "kaggle>=1.8.0" six
           [ -n "$KAGGLE_API_TOKEN" ] || { echo "KAGGLE_API_TOKEN missing"; exit 1; }
           [ -n "$KAGGLE_USERNAME" ] || { echo "KAGGLE_USERNAME missing"; exit 1; }
-          echo "username length ${#KAGGLE_USERNAME}"
+          echo "username length ${#KAGGLE_USERNAME}; token length ${#KAGGLE_API_TOKEN}, starts ${KAGGLE_API_TOKEN:0:5}, has-space $(printf %s "$KAGGLE_API_TOKEN" | grep -c " ")"
+          kaggle --version
           kaggle kernels list --mine --page-size 5 || true
       - name: Push GPU test kernel
         run: |
