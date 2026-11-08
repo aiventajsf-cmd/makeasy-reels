@@ -1,0 +1,107 @@
+name: Clone lip-sync test (Junaid, encrypted)
+
+# Junaid's face (decrypted from assets/private) + his cloned voice -> lip-synced clip.
+# The result is encrypted again and pushed to the private-out branch (nothing private is ever public).
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "What the clone should say"
+        required: false
+        default: "Hi, I'm Junaid, and this is the first time I'm showing my face on Makeasy AI. For the last few days, every post on this page was made by AI agents that I built myself."
+      start:
+        description: "Second of the base video to start from"
+        required: false
+        default: "6"
+
+permissions:
+  contents: write
+
+jobs:
+  lipsync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: ffmpeg (static)
+        run: |
+          curl -fsSL --retry 3 -o /tmp/ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1 && echo "/tmp/ff/bin" >> "$GITHUB_PATH"
+
+      - name: Decrypt private files
+        env:
+          CLONE_KEY: ${{ secrets.CLONE_KEY }}
+        run: |
+          set -e
+          printf '%s' "$CLONE_KEY" | tr -d '\r\n ' > /tmp/k.bin
+          echo "key length $(wc -c < /tmp/k.bin), fingerprint $(sha256sum /tmp/k.bin | cut -c1-8)"
+          mkdir -p /tmp/priv
+          for f in voice_ref.wav face_base.mp4; do
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in assets/private/junaid_$f.enc -out /tmp/priv/$f -pass file:/tmp/k.bin
+          done
+          cd /tmp/priv && sha256sum -c "$GITHUB_WORKSPACE/assets/private.sha256"
+
+      - name: Cloned voice (Chatterbox, own venv)
+        env:
+          TEXT: ${{ inputs.text }}
+        run: |
+          set -e
+          T0=$(date +%s)
+          python -m venv /tmp/cb
+          /tmp/cb/bin/pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          /tmp/cb/bin/pip install -q chatterbox-tts==0.1.7
+          /tmp/cb/bin/python - <<'EOF'
+          import os, torchaudio
+          from chatterbox.tts import ChatterboxTTS
+          m = ChatterboxTTS.from_pretrained(device="cpu")
+          wav = m.generate(os.environ["TEXT"], audio_prompt_path="/tmp/priv/voice_ref.wav", exaggeration=0.6, cfg_weight=0.45)
+          torchaudio.save("/tmp/priv/speech24.wav", wav, m.sr)
+          print("speech", round(wav.shape[-1] / m.sr, 1), "s")
+          EOF
+          ffmpeg -loglevel error -y -i /tmp/priv/speech24.wav -ar 16000 -ac 1 /tmp/priv/speech.wav
+          echo "voice seconds: $(( $(date +%s) - T0 ))"
+
+      - name: MuseTalk (CPU, no mmpose)
+        run: |
+          set -e
+          T0=$(date +%s)
+          git clone -q --depth 1 https://github.com/TMElyralab/MuseTalk.git /tmp/mt
+          pip install -q torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q diffusers==0.30.2 accelerate==0.28.0 numpy==1.23.5 opencv-python==4.9.0.80 soundfile==0.12.1 \
+            transformers==4.39.2 huggingface_hub==0.30.2 librosa==0.11.0 einops==0.8.1 omegaconf mediapipe==0.10.14 gdown
+          cd /tmp/mt
+          mkdir -p models/musetalkV15 models/sd-vae models/whisper models/face-parse-bisent
+          huggingface-cli download TMElyralab/MuseTalk --local-dir models --include "musetalkV15/musetalk.json" "musetalkV15/unet.pth"
+          huggingface-cli download stabilityai/sd-vae-ft-mse --local-dir models/sd-vae --include "config.json" "diffusion_pytorch_model.bin"
+          huggingface-cli download openai/whisper-tiny --local-dir models/whisper --include "config.json" "pytorch_model.bin" "preprocessor_config.json"
+          huggingface-cli download ManyOtherFunctions/face-parse-bisent --local-dir models/face-parse-bisent --include "79999_iter.pth" || \
+            gdown --id 154JgKpzCPW82qINcVieuPH3fZ2e0P812 -O models/face-parse-bisent/79999_iter.pth
+          curl -fsSL -o models/face-parse-bisent/resnet18-5c106cde.pth https://download.pytorch.org/models/resnet18-5c106cde.pth
+          echo "setup seconds: $(( $(date +%s) - T0 ))"
+
+      - name: Lip-sync (timed)
+        run: |
+          nproc
+          python clone/lipsync.py --mt /tmp/mt --face /tmp/priv/face_base.mp4 --audio /tmp/priv/speech.wav \
+            --out /tmp/priv/clone_test.mp4 --start "${{ inputs.start }}" --batch 8
+          cat /tmp/priv/clone_test.mp4.json
+
+      - name: Encrypt and push result to private-out
+        run: |
+          set -e
+          mkdir -p /tmp/po && cp /tmp/priv/clone_test.mp4.json /tmp/po/clone_test.json
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in /tmp/priv/clone_test.mp4 -out /tmp/po/clone_test.mp4.enc -pass file:/tmp/k.bin
+          rm -f /tmp/k.bin
+          git config user.name "Makeasy Spark"; git config user.email "actions@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin private-out > /dev/null; then
+            git fetch -q --depth 1 origin private-out && git checkout -q -B private-out FETCH_HEAD
+          else
+            git checkout -q --orphan private-out && git rm -rq --cached . && git clean -fdxq
+          fi
+          mkdir -p out && cp /tmp/po/* out/
+          git add out && git commit -qm "encrypted clone test ${{ github.run_id }}" && git push -q origin private-out
