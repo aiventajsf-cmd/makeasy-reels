@@ -43,6 +43,7 @@ jobs:
           pip install -q -U openmim
           mim install -q mmengine
           pip install -q mmcv==2.0.1 -f https://download.openmmlab.com/mmcv/dist/cpu/torch2.0/index.html
+          pip install -q -U setuptools wheel
           pip install -q --no-build-isolation chumpy   # mmpose dependency that fails in an isolated build
           mim install -q "mmdet==3.1.0" "mmpose==1.1.0"
           python -c "import mmcv, mmpose, torch; print('mmcv', mmcv.__version__, 'mmpose', mmpose.__version__, 'torch', torch.__version__)"
