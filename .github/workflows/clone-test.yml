@@ -91,7 +91,7 @@ jobs:
           espeak-ng -s 150 -w /tmp/in/speech.wav "Here are three AI updates from this week that you can actually use today. Number one is really impressive, so stay till the end." || \
             ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=220:duration=$SECS" /tmp/in/speech.wav
           ffmpeg -loglevel error -y -i /tmp/in/speech.wav -t "$SECS" -ar 16000 -ac 1 /tmp/in/audio.wav
-          ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/in/face.mp4 /tmp/in/audio.wav
+          for f in /tmp/in/face.mp4 /tmp/in/audio.wav; do ffprobe -v error -show_entries format=duration -of csv=p=0 "$f"; done
 
       - name: Lip-sync (CPU, timed)
         working-directory: /tmp/mt
