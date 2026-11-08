@@ -1,0 +1,113 @@
+name: Clone lip-sync test (MuseTalk on CPU)
+
+# Feasibility test for AI-clone Reels: can the free GitHub runner lip-sync a face video to new audio in reasonable time?
+on:
+  workflow_dispatch:
+    inputs:
+      face_url:
+        description: "URL of a face video (blank = Pixabay stock clip of a person talking)"
+        required: false
+        default: ""
+      seconds:
+        description: "Seconds of audio to lip-sync"
+        required: false
+        default: "8"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: ffmpeg (static)
+        run: |
+          curl -fsSL --retry 3 -o /tmp/ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1 && echo "/tmp/ff/bin" >> "$GITHUB_PATH"
+
+      - name: MuseTalk code
+        run: git clone -q --depth 1 https://github.com/TMElyralab/MuseTalk.git /tmp/mt
+
+      - name: Python packages (CPU)
+        run: |
+          set -e
+          T0=$(date +%s)
+          pip install -q torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q diffusers==0.30.2 accelerate==0.28.0 numpy==1.23.5 opencv-python==4.9.0.80 soundfile==0.12.1 \
+            transformers==4.39.2 huggingface_hub==0.30.2 librosa==0.11.0 einops==0.8.1 omegaconf ffmpeg-python moviepy \
+            "imageio[ffmpeg]" gdown requests
+          pip install -q -U openmim
+          mim install -q mmengine
+          pip install -q mmcv==2.0.1 -f https://download.openmmlab.com/mmcv/dist/cpu/torch2.0/index.html
+          mim install -q "mmdet==3.1.0" "mmpose==1.1.0"
+          python -c "import mmcv, mmpose, torch; print('mmcv', mmcv.__version__, 'mmpose', mmpose.__version__, 'torch', torch.__version__)"
+          echo "install seconds: $(( $(date +%s) - T0 ))"
+
+      - name: Model weights
+        working-directory: /tmp/mt
+        run: |
+          set -e
+          mkdir -p models/musetalk models/musetalkV15 models/syncnet models/dwpose models/face-parse-bisent models/sd-vae models/whisper
+          huggingface-cli download TMElyralab/MuseTalk --local-dir models --include "musetalk/musetalk.json" "musetalk/pytorch_model.bin" "musetalkV15/musetalk.json" "musetalkV15/unet.pth"
+          huggingface-cli download stabilityai/sd-vae-ft-mse --local-dir models/sd-vae --include "config.json" "diffusion_pytorch_model.bin"
+          huggingface-cli download openai/whisper-tiny --local-dir models/whisper --include "config.json" "pytorch_model.bin" "preprocessor_config.json"
+          huggingface-cli download yzd-v/DWPose --local-dir models/dwpose --include "dw-ll_ucoco_384.pth"
+          gdown --id 154JgKpzCPW82qINcVieuPH3fZ2e0P812 -O models/face-parse-bisent/79999_iter.pth || \
+            huggingface-cli download ManyOtherFunctions/face-parse-bisent --local-dir models/face-parse-bisent --include "79999_iter.pth" || true
+          curl -fsSL -o models/face-parse-bisent/resnet18-5c106cde.pth https://download.pytorch.org/models/resnet18-5c106cde.pth
+          du -sh models/*
+
+      - name: Test inputs (face video + audio)
+        env:
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          FACE_URL: ${{ inputs.face_url }}
+          SECS: ${{ inputs.seconds }}
+        run: |
+          set -e
+          mkdir -p /tmp/in
+          if [ -z "$FACE_URL" ]; then
+            FACE_URL=$(python - <<'EOF'
+          import os, requests
+          r = requests.get("https://pixabay.com/api/videos/", params={"key": os.environ["PIXABAY_API_KEY"], "q": "man talking to camera", "per_page": 30, "safesearch": "true"}, timeout=30).json()
+          for v in r.get("hits", []):
+              f = v["videos"].get("medium") or v["videos"].get("small")
+              if f and f.get("url") and v.get("duration", 0) >= 6:
+                  print(f["url"]); break
+          EOF
+          )
+          fi
+          echo "face: $FACE_URL"
+          curl -fsSL -o /tmp/in/face_raw.mp4 "$FACE_URL"
+          # trim to the audio length, 25 fps, max 720 px tall
+          ffmpeg -loglevel error -y -stream_loop -1 -i /tmp/in/face_raw.mp4 -t "$SECS" -vf "fps=25,scale=-2:'min(720,ih)'" -an /tmp/in/face.mp4
+          # test speech: plain synthetic tone-free speech via espeak (only a lip-sync speed test)
+          sudo timeout 200 apt-get install -y -qq espeak-ng > /dev/null 2>&1 || true
+          espeak-ng -s 150 -w /tmp/in/speech.wav "Here are three AI updates from this week that you can actually use today. Number one is really impressive, so stay till the end." || \
+            ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=220:duration=$SECS" /tmp/in/speech.wav
+          ffmpeg -loglevel error -y -i /tmp/in/speech.wav -t "$SECS" -ar 16000 -ac 1 /tmp/in/audio.wav
+          ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/in/face.mp4 /tmp/in/audio.wav
+
+      - name: Lip-sync (CPU, timed)
+        working-directory: /tmp/mt
+        run: |
+          set -e
+          printf 'task_0:\n  video_path: "/tmp/in/face.mp4"\n  audio_path: "/tmp/in/audio.wav"\n' > /tmp/in/task.yaml
+          nproc; free -g | head -2
+          T0=$(date +%s)
+          python -m scripts.inference --inference_config /tmp/in/task.yaml --result_dir /tmp/out --unet_model_path models/musetalkV15/unet.pth \
+            --unet_config models/musetalkV15/musetalk.json --version v15 --batch_size 4 --output_vid_name clone_test.mp4
+          echo "LIPSYNC_SECONDS=$(( $(date +%s) - T0 ))" | tee /tmp/out/timing.txt
+          find /tmp/out -name "*.mp4" -exec ls -la {} \;
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clone-test
+          path: |
+            /tmp/out
+            /tmp/in/face.mp4
